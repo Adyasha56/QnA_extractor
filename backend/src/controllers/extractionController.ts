@@ -1,12 +1,12 @@
 import { Request, Response, NextFunction } from "express";
 import { extractQuestions } from "../services/questionExtractor";
 import { extractAnswers } from "../services/answerExtractor";
-import { buildAnthropicClientFromEnv } from "../clients/anthropicVisionClient";
+import { buildVisionClientFromEnv } from "../clients/visionClientFactory";
 import { OcrPage } from "../models/extraction";
 
 // Build the vision client once at module load.
 // Returns null when ANTHROPIC_API_KEY is absent (tests / no-AI mode).
-const visionProvider = buildAnthropicClientFromEnv();
+const visionProvider = buildVisionClientFromEnv();
 
 function parseBody(body: unknown): {
   pages: OcrPage[];
