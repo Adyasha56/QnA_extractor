@@ -1,1 +1,17 @@
 AI_Contract/
+
+# Environment
+.env
+.env.local
+
+# Node
+node_modules/
+dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
