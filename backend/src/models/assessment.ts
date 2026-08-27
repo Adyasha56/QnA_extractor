@@ -1,3 +1,6 @@
+import { Question, Answer } from "./extraction";
+import { QuestionAnswerMapping, UnansweredQuestion, UnmatchedAnswer } from "./mapping";
+
 export type CloudinaryAsset = {
   publicId: string;
   secureUrl: string;
@@ -15,6 +18,16 @@ export type ProcessingStatus =
   | "completed"
   | "failed";
 
+export type AssessmentResult = {
+  assessmentId: string;
+  questions: Question[];
+  answers: Answer[];
+  mappings: QuestionAnswerMapping[];
+  unansweredQuestions: UnansweredQuestion[];
+  unmatchedAnswers: UnmatchedAnswer[];
+  processingStatus: ProcessingStatus;
+};
+
 export type Assessment = {
   id: string;
   status: ProcessingStatus;
@@ -22,4 +35,5 @@ export type Assessment = {
   updatedAt: string;
   questionPaper?: CloudinaryAsset;
   answerSheet?: CloudinaryAsset;
+  result?: AssessmentResult;
 };

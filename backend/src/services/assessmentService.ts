@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { Assessment, CloudinaryAsset } from "../models/assessment";
+import { Assessment, AssessmentResult, CloudinaryAsset, ProcessingStatus } from "../models/assessment";
 
 const store = new Map<string, Assessment>();
 
@@ -40,6 +40,20 @@ export function setQuestionPaper(id: string, asset: CloudinaryAsset): Assessment
 export function setAnswerSheet(id: string, asset: CloudinaryAsset): Assessment {
   const assessment = findOrThrow(id);
   assessment.answerSheet = asset;
+  assessment.updatedAt = now();
+  return assessment;
+}
+
+export function updateStatus(id: string, status: ProcessingStatus): Assessment {
+  const assessment = findOrThrow(id);
+  assessment.status = status;
+  assessment.updatedAt = now();
+  return assessment;
+}
+
+export function setResult(id: string, result: AssessmentResult): Assessment {
+  const assessment = findOrThrow(id);
+  assessment.result = result;
   assessment.updatedAt = now();
   return assessment;
 }
