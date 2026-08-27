@@ -55,18 +55,21 @@ export async function extractAnswers(
   pages: OcrPage[],
   options: AnswerExtractionOptions = {}
 ): Promise<Answer[]> {
-  const lines = reconstructLines(pages);
-  const deterministic = parseAnswersFromLines(lines);
-
-  if (deterministic.length > 0) {
-    return deterministic;
-  }
-
+  // Gemini is the authoritative source for handwritten answer extraction.
+  // Tesseract OCR is unreliable for handwriting and must not override AI results.
+  // If AI is available, attempt it first. Any AI failure falls through to
+  // local Tesseract parsing so the pipeline never crashes.
   if (options.visionProvider && (options.imageUrl || options.imageBase64)) {
-    return extractAnswersWithAI(options.visionProvider, options, pages);
+    try {
+      return await extractAnswersWithAI(options.visionProvider, options, pages);
+    } catch {
+      // AI failed (network error, timeout, malformed response, etc.).
+      // Fall back to Tesseract deterministic parsing.
+    }
   }
 
-  return [];
+  const lines = reconstructLines(pages);
+  return parseAnswersFromLines(lines);
 }
 
 // ─── Line reconstruction (identical strategy to question extractor) ───────────

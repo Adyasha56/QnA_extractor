@@ -221,10 +221,10 @@ describe("extractAnswers — deterministic", () => {
   });
 });
 
-// ─── AI-assisted extraction ──────────────────────────────────────────────────
+// ─── Gemini-first extraction ─────────────────────────────────────────────────
 
-describe("extractAnswers — AI fallback", () => {
-  it("calls vision provider when deterministic finds nothing", async () => {
+describe("extractAnswers — Gemini-first extraction", () => {
+  it("calls Gemini as the primary source when an image URL is provided", async () => {
     const provider = makeMockVisionProvider(MOCK_AI_ANSWERS);
     const answers = await extractAnswers(GARBLED_ANSWER_PAGES, {
       visionProvider: provider,
@@ -234,13 +234,14 @@ describe("extractAnswers — AI fallback", () => {
     expect(answers).toHaveLength(3);
   });
 
-  it("does NOT call vision provider when deterministic succeeds", async () => {
+  it("calls Gemini first even when Tesseract OCR would succeed", async () => {
     const provider = makeMockVisionProvider(MOCK_AI_ANSWERS);
     await extractAnswers(BASIC_ANSWER_PAGES, {
       visionProvider: provider,
       imageUrl: "http://example.com/sheet.png",
     });
-    expect(provider.analyze).not.toHaveBeenCalled();
+    // Gemini is authoritative — always called when available, regardless of OCR quality.
+    expect(provider.analyze).toHaveBeenCalledTimes(1);
   });
 
   it("AI result has correct question numbers", async () => {
@@ -286,14 +287,14 @@ describe("extractAnswers — AI fallback", () => {
     expect(answers[0].detectedQuestionNumber).toBe("1");
   });
 
-  it("throws when AI returns a non-array", async () => {
+  it("malformed Gemini response falls back to Tesseract (no exception propagated)", async () => {
     const provider = makeMockVisionProvider({ error: "unexpected object" });
-    await expect(
-      extractAnswers(GARBLED_ANSWER_PAGES, {
-        visionProvider: provider,
-        imageUrl: "http://example.com/sheet.png",
-      })
-    ).rejects.toThrow(/expected a JSON array/i);
+    // GARBLED_ANSWER_PAGES → Tesseract also finds nothing → safe empty result.
+    const answers = await extractAnswers(GARBLED_ANSWER_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://example.com/sheet.png",
+    });
+    expect(answers).toEqual([]);
   });
 
   it("does not call AI when no image URL or base64 is provided", async () => {
@@ -303,15 +304,105 @@ describe("extractAnswers — AI fallback", () => {
     expect(answers).toEqual([]);
   });
 
-  it("provider failure propagates as a rejected promise", async () => {
+  it("Gemini API failure falls back to Tesseract deterministic parsing", async () => {
     const provider: VisionProvider = {
       analyze: jest.fn().mockRejectedValue(new Error("Network timeout")),
     };
-    await expect(
-      extractAnswers(GARBLED_ANSWER_PAGES, {
-        visionProvider: provider,
-        imageUrl: "http://example.com/sheet.png",
-      })
-    ).rejects.toThrow("Network timeout");
+    // GARBLED_ANSWER_PAGES → Tesseract also finds nothing → safe empty result, no throw.
+    const answers = await extractAnswers(GARBLED_ANSWER_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://example.com/sheet.png",
+    });
+    expect(answers).toEqual([]);
+  });
+});
+
+// ─── Phase 7A: Gemini-first handwritten answer extraction ─────────────────────
+
+describe("extractAnswers — Phase 7A: Gemini-first for handwriting", () => {
+  // Simulates what Gemini actually returns for a handwritten answer sheet
+  // with multiple out-of-order answers (matches the real benchmark result shape).
+  const HANDWRITTEN_AI_RESPONSE = [
+    { questionNumber: "6",    answerText: "Inheritance allows a class to acquire properties and behaviours from another class." },
+    { questionNumber: "2(a)", answerText: "An operating system manages hardware and software resources." },
+    { questionNumber: "3",    answerText: "Recursion is when a function calls itself to solve a smaller sub-problem." },
+    { questionNumber: "1",    answerText: "A variable is a named storage location in memory." },
+  ];
+
+  it("extracts multiple handwritten answers via Gemini", async () => {
+    const provider = makeMockVisionProvider(HANDWRITTEN_AI_RESPONSE);
+    const answers = await extractAnswers(GARBLED_ANSWER_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://cloudinary.com/answer-sheet.pdf",
+    });
+    expect(answers).toHaveLength(4);
+  });
+
+  it("preserves out-of-order handwritten answers without reordering", async () => {
+    const provider = makeMockVisionProvider(HANDWRITTEN_AI_RESPONSE);
+    const answers = await extractAnswers(GARBLED_ANSWER_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://cloudinary.com/answer-sheet.pdf",
+    });
+    const numbers = answers.map((a) => a.detectedQuestionNumber);
+    expect(numbers).toEqual(["6", "2(a)", "3", "1"]);
+  });
+
+  it("preserves sub-part labels exactly as Gemini returns them", async () => {
+    const provider = makeMockVisionProvider(HANDWRITTEN_AI_RESPONSE);
+    const answers = await extractAnswers(GARBLED_ANSWER_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://cloudinary.com/answer-sheet.pdf",
+    });
+    expect(answers.find((a) => a.detectedQuestionNumber === "2(a)")).toBeDefined();
+  });
+
+  it("Gemini answers have no fabricated bounding-box coordinates", async () => {
+    const provider = makeMockVisionProvider(HANDWRITTEN_AI_RESPONSE);
+    const answers = await extractAnswers(GARBLED_ANSWER_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://cloudinary.com/answer-sheet.pdf",
+    });
+    answers.forEach((a) => expect(a.regions).toEqual([]));
+  });
+
+  it("Gemini failure with parseable OCR pages falls back to Tesseract result", async () => {
+    const failingProvider: VisionProvider = {
+      analyze: jest.fn().mockRejectedValue(new Error("quota exceeded")),
+    };
+    // BASIC_ANSWER_PAGES has clean OCR that Tesseract can parse.
+    const answers = await extractAnswers(BASIC_ANSWER_PAGES, {
+      visionProvider: failingProvider,
+      imageUrl: "http://cloudinary.com/answer-sheet.pdf",
+    });
+    expect(answers).toHaveLength(2);
+    expect(answers.find((a) => a.detectedQuestionNumber === "1")).toBeDefined();
+    expect(answers.find((a) => a.detectedQuestionNumber === "2")).toBeDefined();
+  });
+
+  it("malformed Gemini response falls back to Tesseract result on parseable pages", async () => {
+    const provider = makeMockVisionProvider({ unexpected: "object" });
+    const answers = await extractAnswers(BASIC_ANSWER_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://cloudinary.com/answer-sheet.pdf",
+    });
+    expect(answers).toHaveLength(2);
+  });
+
+  it("no visionProvider (missing key) → Tesseract is used directly", async () => {
+    // No provider passed — simulates missing GEMINI_API_KEY.
+    const answers = await extractAnswers(BASIC_ANSWER_PAGES);
+    expect(answers).toHaveLength(2);
+    expect(answers.find((a) => a.detectedQuestionNumber === "1")).toBeDefined();
+  });
+
+  it("assigns unique ids to all Gemini-extracted answers", async () => {
+    const provider = makeMockVisionProvider(HANDWRITTEN_AI_RESPONSE);
+    const answers = await extractAnswers(GARBLED_ANSWER_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://cloudinary.com/answer-sheet.pdf",
+    });
+    const ids = answers.map((a) => a.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
