@@ -1,8 +1,9 @@
 import httpx
-from app.models.document import ProcessingResult
+from app.models.document import ProcessingResult, RenderResult
 from app.ocr.base import OcrProvider
 from app.processors.pdf_processor import extract_pages_from_pdf
 from app.processors.image_processor import extract_from_image
+from app.processors.page_renderer import render_pdf_pages
 
 # Content-type → processing strategy
 _CONTENT_TYPE_MAP: dict[str, str] = {
@@ -48,6 +49,29 @@ async def process_document_url(
         raise ValueError(f"Cannot determine document type for URL: {url}")
 
     return ProcessingResult(pages=pages)
+
+
+async def render_document_pages(url: str) -> RenderResult:
+    """
+    Download a PDF from a URL and render each page to a PNG image.
+
+    Only PDF documents are supported. Images do not require page rendering
+    and will raise a ValueError if passed here.
+
+    Raises:
+        ValueError: For non-PDF content, download failures, or corrupt PDFs.
+        RuntimeError: For unexpected server-side failures during download.
+    """
+    content, doc_kind = await _download(url)
+
+    if doc_kind != "pdf":
+        raise ValueError(
+            "Page rendering requires a PDF document. "
+            f"Received document type: {doc_kind!r}."
+        )
+
+    pages = render_pdf_pages(content)
+    return RenderResult(pages=pages)
 
 
 async def _download(url: str) -> tuple[bytes, str]:
