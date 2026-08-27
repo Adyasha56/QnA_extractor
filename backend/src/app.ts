@@ -3,6 +3,7 @@ import healthRouter from "./routes/health";
 import assessmentsRouter from "./routes/assessments";
 import extractionRouter from "./routes/extraction";
 import mappingRouter from "./routes/mapping";
+import benchmarkRouter from "./routes/benchmark";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 
 const app = express();
@@ -13,6 +14,7 @@ app.use("/api/health", healthRouter);
 app.use("/api/assessments", assessmentsRouter);
 app.use("/api/extract", extractionRouter);
 app.use("/api/map", mappingRouter);
+app.use("/api/benchmark", benchmarkRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
