@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { v2 as cloudinary } from "cloudinary";
 import { env } from "../config/env";
 import { CloudinaryAsset } from "../models/assessment";
@@ -13,9 +14,11 @@ export async function uploadToCloudinary(
   folder: string,
   originalFilename: string
 ): Promise<CloudinaryAsset> {
+  const publicId = `${folder}/${randomUUID().slice(0, 8)}`;
+
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
-      { folder, resource_type: "auto", use_filename: false, unique_filename: true },
+      { public_id: publicId, resource_type: "image", access_mode: "public", overwrite: false },
       (error, result) => {
         if (error || !result) {
           reject(error ?? new Error("Cloudinary upload returned no result"));
