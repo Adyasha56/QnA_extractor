@@ -21,7 +21,7 @@ export async function mapHandler(
     // Deterministic label matching only — no semantic provider wired at this
     // layer. Callers that need semantic matching invoke the service directly.
     const result = await mapQuestionsToAnswers(questions, answers);
-    res.json(result);
+    res.status(200).json(result);
   } catch (err) {
     next(err);
   }

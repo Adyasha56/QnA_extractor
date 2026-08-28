@@ -24,6 +24,16 @@ export async function processAssessment(id: string): Promise<AssessmentResult> {
   // Throws 404 if not found.
   const assessment = assessmentService.getAssessment(id);
 
+  // Prevent concurrent processing — a second call while one is in flight
+  // would cause both to run simultaneously against the same in-memory state.
+  const inProgress = ["processing_question_paper", "processing_answer_sheet", "mapping_answers"];
+  if (inProgress.includes(assessment.status)) {
+    throw Object.assign(
+      new Error("Assessment is already being processed. Please wait for it to complete."),
+      { statusCode: 409 }
+    );
+  }
+
   if (!assessment.questionPaper) {
     throw Object.assign(
       new Error("Question paper has not been uploaded for this assessment"),

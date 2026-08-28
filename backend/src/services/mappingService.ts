@@ -80,8 +80,8 @@ export async function mapQuestionsToAnswers(
         group.push(answer);
         labeledGroups.set(answer.detectedQuestionNumber, group);
       } else {
-        // Has a question number but blank text → treat as unmatched (req 12).
-        unmatched.push({ answerId: answer.id, status: "unmatched" });
+        // Blank text — skip entirely. The question becomes unanswered naturally;
+        // blank answers are not "unmatched", they are simply not answered.
       }
     } else {
       unlabeledAnswers.push(answer);

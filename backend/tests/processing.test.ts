@@ -317,9 +317,78 @@ describe("GET /api/assessments/:id/status", () => {
     expect(typeof res.body.updatedAt).toBe("string");
   });
 
+  it("returns progress field as a number between 0 and 100", async () => {
+    const id = await createAssessment();
+    const res = await request(app).get(`/api/assessments/${id}/status`);
+
+    expect(typeof res.body.progress).toBe("number");
+    expect(res.body.progress).toBeGreaterThanOrEqual(0);
+    expect(res.body.progress).toBeLessThanOrEqual(100);
+  });
+
+  it("returns a human-readable message field", async () => {
+    const id = await createAssessment();
+    const res = await request(app).get(`/api/assessments/${id}/status`);
+
+    expect(typeof res.body.message).toBe("string");
+    expect(res.body.message.length).toBeGreaterThan(0);
+  });
+
+  it("returns progress 100 and completed message after successful processing", async () => {
+    const id = await createReadyAssessment();
+    await request(app).post(`/api/assessments/${id}/process`).expect(200);
+
+    const res = await request(app).get(`/api/assessments/${id}/status`);
+    expect(res.body.progress).toBe(100);
+    expect(res.body.status).toBe("completed");
+  });
+
   it("returns 404 for an unknown assessment", async () => {
     const res = await request(app).get("/api/assessments/unknown-id/status");
     expect(res.status).toBe(404);
+  });
+});
+
+// ─── POST /api/assessments/:id/process — concurrent processing guard ──────────
+
+describe("POST /api/assessments/:id/process — concurrent processing guard", () => {
+  it("returns 409 when assessment is already being processed", async () => {
+    const id = await createReadyAssessment();
+
+    // Simulate an in-progress state by manipulating the store directly
+    const { updateStatus } = await import("../src/services/assessmentService");
+    updateStatus(id, "processing_question_paper");
+
+    const res = await request(app).post(`/api/assessments/${id}/process`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already being processed/i);
+  });
+
+  it("returns 409 when status is processing_answer_sheet", async () => {
+    const id = await createReadyAssessment();
+    const { updateStatus } = await import("../src/services/assessmentService");
+    updateStatus(id, "processing_answer_sheet");
+
+    const res = await request(app).post(`/api/assessments/${id}/process`);
+    expect(res.status).toBe(409);
+  });
+
+  it("returns 409 when status is mapping_answers", async () => {
+    const id = await createReadyAssessment();
+    const { updateStatus } = await import("../src/services/assessmentService");
+    updateStatus(id, "mapping_answers");
+
+    const res = await request(app).post(`/api/assessments/${id}/process`);
+    expect(res.status).toBe(409);
+  });
+
+  it("allows re-processing when status is completed", async () => {
+    const id = await createReadyAssessment();
+    await request(app).post(`/api/assessments/${id}/process`).expect(200);
+
+    // Second call on completed assessment should succeed (not 409)
+    const res = await request(app).post(`/api/assessments/${id}/process`);
+    expect(res.status).toBe(200);
   });
 });
 
