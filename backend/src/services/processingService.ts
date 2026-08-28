@@ -3,6 +3,7 @@ import * as assessmentService from "./assessmentService";
 import { processDocument } from "../clients/pythonClient";
 import { extractQuestions } from "./questionExtractor";
 import { extractAnswers } from "./answerExtractor";
+import { localizeAnswerRegions } from "./answerLocalizationService";
 import { mapQuestionsToAnswers } from "./mappingService";
 import { buildVisionClientFromEnv } from "../clients/visionClientFactory";
 
@@ -49,10 +50,25 @@ export async function processAssessment(id: string): Promise<AssessmentResult> {
 
     assessmentService.updateStatus(id, "processing_answer_sheet");
     const answerPages = await processDocument(assessment.answerSheet.secureUrl);
-    const answers = await extractAnswers(answerPages, {
+    let answers = await extractAnswers(answerPages, {
       visionProvider,
       imageUrl: assessment.answerSheet.secureUrl,
     });
+
+    // Phase 8: populate Answer.regions via Gemini coarse bbox + OpenCV tightening.
+    // Best-effort: a localization failure never crashes the pipeline; the result
+    // will contain text-only answers with empty regions instead.
+    if (visionProvider) {
+      try {
+        answers = await localizeAnswerRegions(
+          assessment.answerSheet.secureUrl,
+          answers,
+          visionProvider
+        );
+      } catch {
+        // Localization failed — continue with text-only answers.
+      }
+    }
 
     assessmentService.updateStatus(id, "mapping_answers");
     const { mappings, unanswered, unmatched } = await mapQuestionsToAnswers(

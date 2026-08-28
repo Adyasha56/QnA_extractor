@@ -212,6 +212,15 @@ async function extractAnswersWithAI(
 
 type RawAIAnswer = { questionNumber: unknown; answerText: unknown };
 
+/**
+ * Normalize raw answer text: strip a bare "Ans:", "Ans:-" etc. prefix that
+ * Gemini may return as the entire answerText for effectively-blank answers.
+ * The deterministic path already strips this prefix via ANS_PREFIX_RE.
+ */
+function normalizeAnswerText(raw: string): string {
+  return raw.replace(/^ans(?:wer)?\s*[-:.]+\s*/i, "").trim();
+}
+
 function validateAndBuildAnswers(raw: unknown): Answer[] {
   if (!Array.isArray(raw)) {
     throw new Error(
@@ -228,11 +237,12 @@ function validateAndBuildAnswers(raw: unknown): Answer[] {
     const number = entry.questionNumber.trim();
     if (!number) continue;
 
-    const text =
+    const rawText =
       typeof entry.answerText === "string" ? entry.answerText.trim() : "";
+    const text = normalizeAnswerText(rawText);
 
     // AI does not supply bounding boxes; regions is empty.
-    // Spatial data must come from the Python service.
+    // Spatial data must come from the Python service (Phase 8 localization).
     answers.push({
       id: `answer_${randomUUID().slice(0, 8)}`,
       text,

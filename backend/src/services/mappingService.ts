@@ -74,9 +74,15 @@ export async function mapQuestionsToAnswers(
 
   for (const answer of answers) {
     if (answer.detectedQuestionNumber) {
-      const group = labeledGroups.get(answer.detectedQuestionNumber) ?? [];
-      group.push(answer);
-      labeledGroups.set(answer.detectedQuestionNumber, group);
+      if (answer.text) {
+        // Non-empty labeled answer → explicit label matching.
+        const group = labeledGroups.get(answer.detectedQuestionNumber) ?? [];
+        group.push(answer);
+        labeledGroups.set(answer.detectedQuestionNumber, group);
+      } else {
+        // Has a question number but blank text → treat as unmatched (req 12).
+        unmatched.push({ answerId: answer.id, status: "unmatched" });
+      }
     } else {
       unlabeledAnswers.push(answer);
     }
