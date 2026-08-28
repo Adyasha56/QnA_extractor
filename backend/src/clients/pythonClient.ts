@@ -105,6 +105,55 @@ export async function processDocument(documentUrl: string): Promise<OcrPage[]> {
   return result.pages;
 }
 
+// ─── /localize/handwriting ───────────────────────────────────────────────────
+
+/** Response from the Phase 7D OpenCV handwriting localizer. */
+export type LocalizeHandwritingResponse = {
+  geminiBbox: { x: number; y: number; width: number; height: number };
+  /** Tight bbox around detected ink in pixel coordinates. null = no ink found. */
+  localizedBbox: { x: number; y: number; width: number; height: number } | null;
+  confidence: number;
+  diagnostics: {
+    component_count: number;
+    foreground_pixel_ratio: number;
+    crop_width: number;
+    crop_height: number;
+  };
+  imageWidth: number;
+  imageHeight: number;
+};
+
+function isLocalizeHandwritingResponse(
+  data: unknown
+): data is LocalizeHandwritingResponse {
+  if (typeof data !== "object" || data === null) return false;
+  const d = data as Record<string, unknown>;
+  return (
+    typeof d.confidence === "number" &&
+    typeof d.imageWidth === "number" &&
+    typeof d.imageHeight === "number" &&
+    "geminiBbox" in d &&
+    "localizedBbox" in d &&
+    "diagnostics" in d
+  );
+}
+
+/**
+ * Ask the Python service to tighten a Gemini coarse bbox using OpenCV.
+ * Returns a tight pixel bbox around detected ink, or null when no ink is found.
+ */
+export async function localizeHandwriting(
+  imageBase64: string,
+  geminiBbox: { x: number; y: number; width: number; height: number }
+): Promise<LocalizeHandwritingResponse> {
+  return pythonPost(
+    "/localize/handwriting",
+    { imageBase64, geminiBbox },
+    isLocalizeHandwritingResponse,
+    "/localize/handwriting"
+  );
+}
+
 // ─── /render-pages ────────────────────────────────────────────────────────────
 
 type RenderPagesResponse = { pages: RenderedPage[] };
