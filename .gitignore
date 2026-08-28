@@ -15,3 +15,7 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Scratch test scripts
+test_localize_chain.py
+document-service/tests/test_handwriting_localizer.py
