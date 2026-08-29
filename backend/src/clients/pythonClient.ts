@@ -34,52 +34,76 @@ export type RenderedPage = {
 
 // ─── Shared HTTP helper ───────────────────────────────────────────────────────
 
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 5_000; // 5s, 10s, 20s — gives Render time to cold-start
+
 async function pythonPost<T>(
   path: string,
   body: Record<string, unknown>,
   validateFn: (data: unknown) => data is T,
   errorLabel: string
 ): Promise<T> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let lastError: PythonClientError | undefined;
 
-  let response: Response;
-  try {
-    response = await fetch(`${PYTHON_SERVICE_URL}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-  } catch (err: unknown) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, RETRY_BASE_MS * attempt));
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    let response: Response;
+    try {
+      response = await fetch(`${PYTHON_SERVICE_URL}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err: unknown) {
+      clearTimeout(timer);
+      const isTimeout = err instanceof Error && err.name === "AbortError";
+      const msg = isTimeout
+        ? "Python service request timed out"
+        : `Python service unreachable: ${err instanceof Error ? err.message : String(err)}`;
+      lastError = new PythonClientError(msg, 502);
+      continue; // retry on network errors
+    }
+
     clearTimeout(timer);
-    const isTimeout = err instanceof Error && err.name === "AbortError";
-    const msg = isTimeout
-      ? "Python service request timed out"
-      : `Python service unreachable: ${err instanceof Error ? err.message : String(err)}`;
-    throw new PythonClientError(msg, 502);
+
+    // Retry on 502/503 — Render returns these during cold-start.
+    if (response.status === 502 || response.status === 503) {
+      const text = await response.text().catch(() => "");
+      lastError = new PythonClientError(
+        `Python service returned HTTP ${response.status}: ${text}`,
+        502
+      );
+      continue;
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new PythonClientError(
+        `Python service returned HTTP ${response.status}: ${text}`,
+        502
+      );
+    }
+
+    const data: unknown = await response.json();
+
+    if (!validateFn(data)) {
+      throw new PythonClientError(
+        `Python service ${errorLabel} response has unexpected shape`,
+        502
+      );
+    }
+
+    return data;
   }
 
-  clearTimeout(timer);
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new PythonClientError(
-      `Python service returned HTTP ${response.status}: ${text}`,
-      502
-    );
-  }
-
-  const data: unknown = await response.json();
-
-  if (!validateFn(data)) {
-    throw new PythonClientError(
-      `Python service ${errorLabel} response has unexpected shape`,
-      502
-    );
-  }
-
-  return data;
+  throw lastError ?? new PythonClientError("Python service failed after retries", 502);
 }
 
 // ─── /process ────────────────────────────────────────────────────────────────
