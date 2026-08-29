@@ -1,6 +1,6 @@
 import { AssessmentResult } from "../models/assessment";
 import * as assessmentService from "./assessmentService";
-import { processDocument } from "../clients/pythonClient";
+import { processDocument, warmupPythonService } from "../clients/pythonClient";
 import { extractQuestions } from "./questionExtractor";
 import { extractAnswers } from "./answerExtractor";
 import { localizeAnswerRegions } from "./answerLocalizationService";
@@ -58,6 +58,10 @@ export async function processAssessment(id: string): Promise<AssessmentResult> {
   assessmentService.setError(id, undefined);
 
   try {
+    // Wake up the Python service before any heavy calls — on Render free tier
+    // the service spins down after 15 min and takes up to 60s to cold-start.
+    await warmupPythonService();
+
     assessmentService.updateStatus(id, "processing_question_paper");
     const questionPages = await processDocument(assessment.questionPaper.secureUrl);
     const questions = await extractQuestions(questionPages, {

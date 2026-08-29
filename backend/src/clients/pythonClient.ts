@@ -6,6 +6,31 @@ const PYTHON_SERVICE_URL =
 // 2-minute ceiling — large PDFs with Tesseract OCR can be slow.
 const REQUEST_TIMEOUT_MS = 120_000;
 
+/**
+ * Polls GET /health until the Python service responds 200 or the timeout
+ * is reached. Call this before any heavy API calls so Render's cold-start
+ * completes before we attempt expensive OCR work.
+ */
+export async function warmupPythonService(timeoutMs = 90_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${PYTHON_SERVICE_URL}/health`, {
+        method: "GET",
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (res.ok) return;
+    } catch {
+      // still starting — wait and retry
+    }
+    await new Promise((r) => setTimeout(r, 4_000));
+  }
+  throw new PythonClientError(
+    "Python service did not become ready within 90 seconds",
+    502
+  );
+}
+
 // ─── Error type ───────────────────────────────────────────────────────────────
 
 export class PythonClientError extends Error {
