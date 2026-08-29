@@ -2,6 +2,14 @@
 
 An AI-powered tool for teachers that extracts questions from exam papers, matches them against handwritten student answers, and produces a structured mapping with bounding-box highlights.
 
+## Live Demo
+
+| Service | URL |
+|---|---|
+| **Frontend** | https://frontend-beta-two-61.vercel.app |
+| **Backend** | https://qna-backend-ztcj.onrender.com |
+| **Document Service** | https://qna-document-service.onrender.com |
+
 ---
 
 ## Architecture
