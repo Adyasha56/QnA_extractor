@@ -98,6 +98,29 @@ describe("benchmarkGeminiRegions — valid region response", () => {
   });
 });
 
+// ─── "Q" prefix stripping ─────────────────────────────────────────────────────
+//
+// Regression: this benchmark runs as a SEPARATE Gemini call from answer
+// extraction (answerExtractor.ts), matched against it purely by string
+// equality on detectedQuestionNumber in answerLocalizationService.ts. If a
+// student labels answers "Q1", "Q4(a)" etc. and only ONE of the two calls
+// strips the prefix, every region silently fails to match its answer —
+// with no error, since a lookup miss is a normal "skip" path, not a throw.
+
+describe("benchmarkGeminiRegions — 'Q' prefix stripping", () => {
+  it("strips a leading 'Q' from detectedQuestionNumber", async () => {
+    const provider = makeProvider([
+      { detectedQuestionNumber: "Q1", text: "Answer.", bbox: { x: 0, y: 0, width: 100, height: 50 } },
+      { detectedQuestionNumber: "Q4(a)", text: "Answer.", bbox: { x: 0, y: 60, width: 100, height: 50 } },
+      { detectedQuestionNumber: "Question 5", text: "Answer.", bbox: { x: 0, y: 120, width: 100, height: 50 } },
+    ]);
+
+    const result = await benchmarkGeminiRegions(provider, IMAGE_BASE64);
+
+    expect(result.regions.map((r) => r.detectedQuestionNumber)).toEqual(["1", "4(a)", "5"]);
+  });
+});
+
 // ─── Multiple answer regions ──────────────────────────────────────────────────
 
 describe("benchmarkGeminiRegions — multiple answer regions", () => {
@@ -415,10 +438,14 @@ function makeSequentialProvider(...responses: unknown[]): VisionProvider {
   return { analyze: mock };
 }
 
+// Fractional [0,1] bbox — the shape buildRegionPrompt actually asks for now.
+// Chosen so that, converted against makeRenderedPage()'s default 1190x1684
+// image, the resulting pixel bbox is exactly { x: 50, y: 100, width: 800, height: 120 } —
+// preserving the original test's downstream pdfBbox expectations below.
 const VALID_GEMINI_REGION = {
   detectedQuestionNumber: "1",
   text: "A variable stores a value.",
-  bbox: { x: 50, y: 100, width: 800, height: 120 },
+  bbox: { x: 50 / 1190, y: 100 / 1684, w: 800 / 1190, h: 120 / 1684 },
 };
 
 // ─── Valid Gemini response ────────────────────────────────────────────────────
@@ -441,18 +468,20 @@ describe("benchmarkGeminiRegionsFromRenderedPages — valid response", () => {
     expect(result.pages[0].malformedCount).toBe(0);
   });
 
-  it("populates pixelBbox with the raw Gemini pixel values", async () => {
+  it("populates pixelBbox by converting the fractional bbox to this image's real pixel space", async () => {
     const provider = makeProvider([VALID_GEMINI_REGION]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]
     );
-    expect(result.pages[0].regions[0].pixelBbox).toEqual(
-      { x: 50, y: 100, width: 800, height: 120 }
-    );
+    const pixel = result.pages[0].regions[0].pixelBbox!;
+    expect(pixel.x).toBeCloseTo(50, 5);
+    expect(pixel.y).toBeCloseTo(100, 5);
+    expect(pixel.width).toBeCloseTo(800, 5);
+    expect(pixel.height).toBeCloseTo(120, 5);
   });
 
   it("populates pdfBbox with correctly converted values", async () => {
-    // A4 at 2×: scaleX = scaleY = 0.5
+    // A4 at 2×: scaleX = scaleY = 0.5 (pdfWidth/imageWidth, pdfHeight/imageHeight)
     const provider = makeProvider([VALID_GEMINI_REGION]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]
@@ -475,13 +504,28 @@ describe("benchmarkGeminiRegionsFromRenderedPages — valid response", () => {
     expect((call.image as { mediaType: string }).mediaType).toBe("image/png");
   });
 
-  it("uses the REGION_PROMPT (asks for pixel coordinates)", async () => {
+  it("asks for fractional [0,1] coordinates, not literal pixels, and states the image's real dimensions", async () => {
     const provider = makeProvider([]);
     await benchmarkGeminiRegionsFromRenderedPages(provider, [makeRenderedPage()]);
 
     const call = (provider.analyze as jest.Mock).mock.calls[0][0] as VisionAnalysisInput;
-    expect(call.prompt).toMatch(/pixel/i);
     expect(call.prompt).toMatch(/bbox/i);
+    expect(call.prompt).toMatch(/fraction/i);
+    expect(call.prompt).toMatch(/\[0,\s*1\]/);
+    expect(call.prompt).toMatch(/1190 pixels wide/i);
+  });
+});
+
+// ─── "Q" prefix stripping ─────────────────────────────────────────────────────
+
+describe("benchmarkGeminiRegionsFromRenderedPages — 'Q' prefix stripping", () => {
+  it("strips a leading 'Q' so regions match answers labeled without one", async () => {
+    const provider = makeProvider([
+      { detectedQuestionNumber: "Q1", text: "Answer.", bbox: { x: 50 / 1190, y: 100 / 1684, w: 800 / 1190, h: 120 / 1684 } },
+    ]);
+    const result = await benchmarkGeminiRegionsFromRenderedPages(provider, [makeRenderedPage()]);
+
+    expect(result.pages[0].regions[0].detectedQuestionNumber).toBe("1");
   });
 });
 
@@ -521,8 +565,8 @@ describe("benchmarkGeminiRegionsFromRenderedPages — multiple pages", () => {
   it("calls the provider once per rendered page", async () => {
     const pages = [makeRenderedPage({ pageNumber: 1 }), makeRenderedPage({ pageNumber: 2 })];
     const provider = makeSequentialProvider(
-      [{ detectedQuestionNumber: "1", text: "Ans 1", bbox: { x: 10, y: 10, width: 500, height: 80 } }],
-      [{ detectedQuestionNumber: "2", text: "Ans 2", bbox: { x: 10, y: 10, width: 500, height: 80 } }]
+      [{ detectedQuestionNumber: "1", text: "Ans 1", bbox: { x: 10 / 1190, y: 10 / 1684, w: 500 / 1190, h: 80 / 1684 } }],
+      [{ detectedQuestionNumber: "2", text: "Ans 2", bbox: { x: 10 / 1190, y: 10 / 1684, w: 500 / 1190, h: 80 / 1684 } }]
     );
 
     await benchmarkGeminiRegionsFromRenderedPages(provider, pages);
@@ -533,8 +577,8 @@ describe("benchmarkGeminiRegionsFromRenderedPages — multiple pages", () => {
   it("returns results for each page in document order", async () => {
     const pages = [makeRenderedPage({ pageNumber: 1 }), makeRenderedPage({ pageNumber: 2 })];
     const provider = makeSequentialProvider(
-      [{ detectedQuestionNumber: "1", text: "Ans 1", bbox: { x: 10, y: 10, width: 500, height: 80 } }],
-      [{ detectedQuestionNumber: "3", text: "Ans 3", bbox: { x: 10, y: 10, width: 500, height: 80 } }]
+      [{ detectedQuestionNumber: "1", text: "Ans 1", bbox: { x: 10 / 1190, y: 10 / 1684, w: 500 / 1190, h: 80 / 1684 } }],
+      [{ detectedQuestionNumber: "3", text: "Ans 3", bbox: { x: 10 / 1190, y: 10 / 1684, w: 500 / 1190, h: 80 / 1684 } }]
     );
 
     const result = await benchmarkGeminiRegionsFromRenderedPages(provider, pages);
@@ -550,7 +594,7 @@ describe("benchmarkGeminiRegionsFromRenderedPages — multiple pages", () => {
     const pages = [makeRenderedPage({ pageNumber: 1 }), makeRenderedPage({ pageNumber: 2 })];
     const provider = makeSequentialProvider(
       // page 1: one bad bbox
-      [{ detectedQuestionNumber: "1", text: "Bad", bbox: { x: NaN, y: 0, width: 100, height: 50 } }],
+      [{ detectedQuestionNumber: "1", text: "Bad", bbox: { x: NaN, y: 0, w: 100 / 1190, h: 50 / 1684 } }],
       // page 2: one bad bbox
       [{ detectedQuestionNumber: "2", text: "Bad2", bbox: {} }]
     );
@@ -568,10 +612,12 @@ describe("benchmarkGeminiRegionsFromRenderedPages — multiple pages", () => {
     // Page 2: scaleX = 0.5, scaleY = 2.0
     const page2 = makeRenderedPage({ pageNumber: 2, pdfWidth: 500, pdfHeight: 1000, imageWidth: 1000, imageHeight: 500 });
 
-    const bbox = { x: 100, y: 100, width: 100, height: 100 };
+    // Same target pixel bbox on both pages ({x:100,y:100,w:100,h:100}), but
+    // each page's fraction differs since it's relative to that page's own
+    // (different) image dimensions.
     const provider = makeSequentialProvider(
-      [{ detectedQuestionNumber: "1", text: "p1", bbox }],
-      [{ detectedQuestionNumber: "2", text: "p2", bbox }]
+      [{ detectedQuestionNumber: "1", text: "p1", bbox: { x: 100 / 500, y: 100 / 1000, w: 100 / 500, h: 100 / 1000 } }],
+      [{ detectedQuestionNumber: "2", text: "p2", bbox: { x: 100 / 1000, y: 100 / 500, w: 100 / 1000, h: 100 / 500 } }]
     );
 
     const result = await benchmarkGeminiRegionsFromRenderedPages(provider, [page1, page2]);
@@ -599,7 +645,7 @@ describe("benchmarkGeminiRegionsFromRenderedPages — multiple pages", () => {
 describe("benchmarkGeminiRegionsFromRenderedPages — malformed bbox", () => {
   it("counts bbox with NaN coordinate as malformed and sets pdfBbox null", async () => {
     const provider = makeProvider([
-      { detectedQuestionNumber: "1", text: "Bad", bbox: { x: NaN, y: 0, width: 100, height: 50 } },
+      { detectedQuestionNumber: "1", text: "Bad", bbox: { x: NaN, y: 0, w: 100 / 1190, h: 50 / 1684 } },
     ]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]
@@ -610,7 +656,7 @@ describe("benchmarkGeminiRegionsFromRenderedPages — malformed bbox", () => {
 
   it("counts bbox with string coordinates as malformed", async () => {
     const provider = makeProvider([
-      { detectedQuestionNumber: "2", text: "Bad", bbox: { x: "10", y: "20", width: "100", height: "50" } },
+      { detectedQuestionNumber: "2", text: "Bad", bbox: { x: "10", y: "20", w: "100", h: "50" } },
     ]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]
@@ -646,9 +692,9 @@ describe("benchmarkGeminiRegionsFromRenderedPages — malformed bbox", () => {
 
 describe("benchmarkGeminiRegionsFromRenderedPages — bbox outside image bounds", () => {
   it("counts bbox that extends beyond imageWidth as malformed", async () => {
-    // imageWidth = 1190; x=100, width=1200 → x+width=1300 > 1190
+    // imageWidth = 1190; fraction converts back to x=100, width=1200 → x+width=1300 > 1190
     const provider = makeProvider([
-      { detectedQuestionNumber: "1", text: "OOB-right", bbox: { x: 100, y: 10, width: 1200, height: 50 } },
+      { detectedQuestionNumber: "1", text: "OOB-right", bbox: { x: 100 / 1190, y: 10 / 1684, w: 1200 / 1190, h: 50 / 1684 } },
     ]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]
@@ -658,9 +704,9 @@ describe("benchmarkGeminiRegionsFromRenderedPages — bbox outside image bounds"
   });
 
   it("counts bbox that extends beyond imageHeight as malformed", async () => {
-    // imageHeight = 1684; y=1600, height=200 → y+height=1800 > 1684
+    // imageHeight = 1684; fraction converts back to y=1600, height=200 → y+height=1800 > 1684
     const provider = makeProvider([
-      { detectedQuestionNumber: "2", text: "OOB-bottom", bbox: { x: 10, y: 1600, width: 100, height: 200 } },
+      { detectedQuestionNumber: "2", text: "OOB-bottom", bbox: { x: 10 / 1190, y: 1600 / 1684, w: 100 / 1190, h: 200 / 1684 } },
     ]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]
@@ -671,19 +717,21 @@ describe("benchmarkGeminiRegionsFromRenderedPages — bbox outside image bounds"
 
   it("preserves pixelBbox even for out-of-bounds bboxes (for debugging)", async () => {
     const provider = makeProvider([
-      { detectedQuestionNumber: "3", text: "OOB debug", bbox: { x: 100, y: 10, width: 1200, height: 50 } },
+      { detectedQuestionNumber: "3", text: "OOB debug", bbox: { x: 100 / 1190, y: 10 / 1684, w: 1200 / 1190, h: 50 / 1684 } },
     ]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]
     );
-    expect(result.pages[0].regions[0].pixelBbox).toEqual(
-      { x: 100, y: 10, width: 1200, height: 50 }
-    );
+    const pixel = result.pages[0].regions[0].pixelBbox!;
+    expect(pixel.x).toBeCloseTo(100, 5);
+    expect(pixel.y).toBeCloseTo(10, 5);
+    expect(pixel.width).toBeCloseTo(1200, 5);
+    expect(pixel.height).toBeCloseTo(50, 5);
   });
 
   it("counts bbox with negative x as malformed", async () => {
     const provider = makeProvider([
-      { detectedQuestionNumber: "4", text: "Neg-x", bbox: { x: -1, y: 0, width: 100, height: 50 } },
+      { detectedQuestionNumber: "4", text: "Neg-x", bbox: { x: -1 / 1190, y: 0, w: 100 / 1190, h: 50 / 1684 } },
     ]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]
@@ -694,7 +742,7 @@ describe("benchmarkGeminiRegionsFromRenderedPages — bbox outside image bounds"
 
   it("counts bbox with negative y as malformed", async () => {
     const provider = makeProvider([
-      { detectedQuestionNumber: "5", text: "Neg-y", bbox: { x: 0, y: -5, width: 100, height: 50 } },
+      { detectedQuestionNumber: "5", text: "Neg-y", bbox: { x: 0, y: -5 / 1684, w: 100 / 1190, h: 50 / 1684 } },
     ]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]
@@ -704,7 +752,7 @@ describe("benchmarkGeminiRegionsFromRenderedPages — bbox outside image bounds"
 
   it("counts bbox with width zero as malformed", async () => {
     const provider = makeProvider([
-      { detectedQuestionNumber: "6", text: "Zero-w", bbox: { x: 10, y: 10, width: 0, height: 50 } },
+      { detectedQuestionNumber: "6", text: "Zero-w", bbox: { x: 10 / 1190, y: 10 / 1684, w: 0, h: 50 / 1684 } },
     ]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]
@@ -715,7 +763,7 @@ describe("benchmarkGeminiRegionsFromRenderedPages — bbox outside image bounds"
   it("accepts a bbox touching the image edge exactly (x + width == imageWidth)", async () => {
     // x=190, width=1000, imageWidth=1190 → 190+1000=1190 exactly
     const provider = makeProvider([
-      { detectedQuestionNumber: "7", text: "Edge", bbox: { x: 190, y: 10, width: 1000, height: 50 } },
+      { detectedQuestionNumber: "7", text: "Edge", bbox: { x: 190 / 1190, y: 10 / 1684, w: 1000 / 1190, h: 50 / 1684 } },
     ]);
     const result = await benchmarkGeminiRegionsFromRenderedPages(
       provider, [makeRenderedPage()]

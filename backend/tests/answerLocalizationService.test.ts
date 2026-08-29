@@ -15,6 +15,7 @@ import {
   RenderedPage,
   LocalizeHandwritingResponse,
 } from "../src/clients/pythonClient";
+import { fetchAsBase64 } from "../src/clients/geminiVisionClient";
 import {
   benchmarkGeminiRegionsFromRenderedPages,
   RenderedBenchmarkResult,
@@ -23,6 +24,7 @@ import {
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
 jest.mock("../src/clients/pythonClient");
+jest.mock("../src/clients/geminiVisionClient");
 
 // Preserve real convertPixelToPdfBbox so coordinate math is exercised.
 jest.mock("../src/services/geminiRegionBenchmark", () => ({
@@ -34,6 +36,7 @@ const mockRenderPages = renderPages as jest.MockedFunction<typeof renderPages>;
 const mockLocalizeHandwriting = localizeHandwriting as jest.MockedFunction<
   typeof localizeHandwriting
 >;
+const mockFetchAsBase64 = fetchAsBase64 as jest.MockedFunction<typeof fetchAsBase64>;
 const mockBenchmarkGemini =
   benchmarkGeminiRegionsFromRenderedPages as jest.MockedFunction<
     typeof benchmarkGeminiRegionsFromRenderedPages
@@ -135,6 +138,7 @@ const ANSWER_SHEET_URL = "https://example.com/answer-sheet.pdf";
 beforeEach(() => {
   jest.clearAllMocks();
   mockRenderPages.mockResolvedValue([RENDERED_PAGE_1]);
+  mockFetchAsBase64.mockResolvedValue({ data: "fake-image-base64", mimeType: "image/jpeg" });
 });
 
 // ─── 1. Valid bbox → localized PDF region ────────────────────────────────────
@@ -681,6 +685,115 @@ describe("multi-page answers", () => {
     const pages = result[0].regions.map((r) => r.page);
     expect(pages).toContain(1);
     expect(pages).toContain(2);
+  });
+});
+
+// ─── 8b. Image answer sheet (non-PDF source) ─────────────────────────────────
+//
+// Regression coverage for extending exact-region highlighting to image
+// (JPEG/PNG) answer sheets, not just PDFs — the assignment explicitly
+// requires highlighting to work regardless of upload format.
+
+describe("image answer sheet (non-PDF source)", () => {
+  it("fetches the raw image instead of calling renderPages", async () => {
+    const answers = [makeAnswer("1")];
+    mockBenchmarkGemini.mockResolvedValue(makeGeminiResult(1, [], { ...RENDERED_PAGE_1, pdfWidth: 800, pdfHeight: 600, imageWidth: 800, imageHeight: 600 }));
+
+    await localizeAnswerRegions(ANSWER_SHEET_URL, answers, MOCK_VISION_PROVIDER, {
+      isPdf: false,
+      imageWidth: 800,
+      imageHeight: 600,
+    });
+
+    expect(mockFetchAsBase64).toHaveBeenCalledWith(ANSWER_SHEET_URL);
+    expect(mockRenderPages).not.toHaveBeenCalled();
+  });
+
+  it("builds a synthetic page whose pdfWidth/pdfHeight equal the image's own pixel dimensions", async () => {
+    const answers = [makeAnswer("1")];
+    mockBenchmarkGemini.mockResolvedValue(makeGeminiResult(1, []));
+
+    await localizeAnswerRegions(ANSWER_SHEET_URL, answers, MOCK_VISION_PROVIDER, {
+      isPdf: false,
+      imageWidth: 800,
+      imageHeight: 600,
+    });
+
+    const [, renderedPagesArg] = mockBenchmarkGemini.mock.calls[0];
+    expect(renderedPagesArg).toEqual([
+      expect.objectContaining({
+        pageNumber: 1,
+        pdfWidth: 800,
+        pdfHeight: 600,
+        imageWidth: 800,
+        imageHeight: 600,
+        imageBase64: "fake-image-base64",
+      }),
+    ]);
+  });
+
+  it("passes the image's real mediaType (not hard-coded PNG) to the Gemini benchmark call", async () => {
+    mockFetchAsBase64.mockResolvedValue({ data: "jpeg-bytes", mimeType: "image/jpeg; charset=binary" });
+    const answers = [makeAnswer("1")];
+    mockBenchmarkGemini.mockResolvedValue(makeGeminiResult(1, []));
+
+    await localizeAnswerRegions(ANSWER_SHEET_URL, answers, MOCK_VISION_PROVIDER, {
+      isPdf: false,
+      imageWidth: 800,
+      imageHeight: 600,
+    });
+
+    const [, , mediaTypeArg] = mockBenchmarkGemini.mock.calls[0];
+    expect(mediaTypeArg).toBe("image/jpeg");
+  });
+
+  it("region bbox equals the raw pixel bbox (scale factor 1) rather than being scaled down", async () => {
+    // pdfWidth/pdfHeight are set equal to imageWidth/imageHeight for images,
+    // so convertPixelToPdfBbox's scale factor is 1 — output must equal input.
+    const answers = [makeAnswer("1")];
+    mockBenchmarkGemini.mockResolvedValue(
+      makeGeminiResult(1, [
+        {
+          detectedQuestionNumber: "1",
+          text: "Answer.",
+          pixelBbox: { x: 100, y: 200, width: 400, height: 100 },
+          pdfBbox: null, // irrelevant — real conversion logic recomputes this
+        },
+      ], { pageNumber: 1, pdfWidth: 800, pdfHeight: 600, imageWidth: 800, imageHeight: 600, imageBase64: "fake-image-base64" })
+    );
+    mockLocalizeHandwriting.mockResolvedValue(
+      makeLocalizeOk({ x: 110, y: 210, width: 380, height: 80 })
+    );
+
+    const result = await localizeAnswerRegions(ANSWER_SHEET_URL, answers, MOCK_VISION_PROVIDER, {
+      isPdf: false,
+      imageWidth: 800,
+      imageHeight: 600,
+    });
+
+    const bbox = result[0].regions[0].bbox;
+    expect(bbox).toEqual({ x: 110, y: 210, width: 380, height: 80 });
+  });
+
+  it("throws (best-effort caller handles it) when given invalid image dimensions", async () => {
+    const answers = [makeAnswer("1")];
+    await expect(
+      localizeAnswerRegions(ANSWER_SHEET_URL, answers, MOCK_VISION_PROVIDER, {
+        isPdf: false,
+        imageWidth: 0,
+        imageHeight: 0,
+      })
+    ).rejects.toThrow(/invalid image dimensions/i);
+  });
+
+  it("defaults to isPdf: true when no source is given (backward compatible)", async () => {
+    const answers = [makeAnswer("1")];
+    mockBenchmarkGemini.mockResolvedValue(makeGeminiResult(1, []));
+
+    await localizeAnswerRegions(ANSWER_SHEET_URL, answers, MOCK_VISION_PROVIDER);
+
+    expect(mockRenderPages).toHaveBeenCalledWith(ANSWER_SHEET_URL);
+    expect(mockFetchAsBase64).not.toHaveBeenCalled();
   });
 });
 

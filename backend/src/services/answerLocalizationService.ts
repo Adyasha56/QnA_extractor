@@ -1,23 +1,15 @@
-/**
- * Phase 8 — answer region localization.
- *
- * Responsibility boundaries (req 16):
- *   Gemini     → coarse pixel bbox per answer block (via benchmarkGeminiRegionsFromRenderedPages)
- *   OpenCV     → visual tightening (via Python /localize/handwriting)
- *   Python     → page rendering (via /render-pages)
- *   convertPixelToPdfBbox → pixel → PDF-point conversion
- *   mappingService → question-answer association (unchanged, separate)
- *
- * Guarantees:
- *   - Answer.regions always use PDF-point coordinates (req 4).
- *   - Gemini raw pixel bbox is never used directly as a final region (req 5).
- *   - Regions are never fabricated (req 6).
- *   - No Gemini bbox → answer keeps empty regions, pipeline continues (req 7).
- *   - No OpenCV foreground → region is NOT added (req 8).
- *   - Empty-text answers receive no regions (req 13).
- *   - Multi-page answers accumulate regions across pages (req 9).
- *   - Does NOT modify answer text, question numbers, or mapping (req 1, 15).
- */
+// Answer region localization: Gemini finds a coarse bbox per answer block,
+// OpenCV tightens it, and the result is converted to PDF-point coordinates
+// (or pixel coordinates for an image answer sheet — see AnswerSheetSource
+// below). Regions are only ever added when both Gemini and OpenCV succeed;
+// nothing is fabricated. Multi-page answers accumulate regions across pages.
+//
+// PDFs are rendered to PNG pages via Python's /render-pages, which reports
+// each page's real PDF-point size alongside its pixel size. Images have no
+// such render step, so they're wrapped in a single synthetic "page" whose
+// pdfWidth/pdfHeight equal the image's own pixel dimensions — making the
+// pixel-to-PDF-point conversion below a no-op, so the stored bbox ends up in
+// the image's own pixel coordinates.
 
 import { Answer, AnswerRegion } from "../models/extraction";
 import { VisionProvider } from "../clients/visionProvider";
@@ -26,25 +18,30 @@ import {
   localizeHandwriting,
   RenderedPage,
 } from "../clients/pythonClient";
+import { fetchAsBase64 } from "../clients/geminiVisionClient";
 import {
   benchmarkGeminiRegionsFromRenderedPages,
   convertPixelToPdfBbox,
 } from "./geminiRegionBenchmark";
 
-/**
- * Populate Answer.regions for each answer that Gemini can locate on the
- * rendered answer sheet pages.
- *
- * @param answerSheetUrl  Cloudinary URL of the answer-sheet PDF.
- * @param answers         Answers from extractAnswers() — regions may be empty.
- * @param visionProvider  An initialised Gemini (or compatible) vision provider.
- * @returns               A new array of Answers with regions populated where
- *                        Gemini + OpenCV succeeded.  Input array is not mutated.
- */
+/** Where the answer sheet's raster pages/image come from. */
+export type AnswerSheetSource =
+  | { isPdf: true }
+  | { isPdf: false; imageWidth: number; imageHeight: number };
+
+function mediaTypeFromMime(mime: string): "image/png" | "image/jpeg" | "image/webp" {
+  if (mime.includes("jpeg") || mime.includes("jpg")) return "image/jpeg";
+  if (mime.includes("webp")) return "image/webp";
+  return "image/png";
+}
+
+// Populates Answer.regions for each answer Gemini can locate on the answer
+// sheet. Does not mutate the input array.
 export async function localizeAnswerRegions(
   answerSheetUrl: string,
   answers: Answer[],
-  visionProvider: VisionProvider
+  visionProvider: VisionProvider,
+  source: AnswerSheetSource = { isPdf: true }
 ): Promise<Answer[]> {
   // Shallow-clone so we never mutate the caller's array or region lists.
   const result: Answer[] = answers.map((a) => ({ ...a, regions: [...a.regions] }));
@@ -59,8 +56,30 @@ export async function localizeAnswerRegions(
     }
   }
 
-  // Step 1: Render all PDF pages to PNG.
-  const renderedPages = await renderPages(answerSheetUrl);
+  // Step 1: obtain raster page(s) — real PDF-point pages for a PDF, or a
+  // single synthetic page wrapping the raw uploaded image.
+  let renderedPages: RenderedPage[];
+  let mediaType: "image/png" | "image/jpeg" | "image/webp" = "image/png";
+
+  if (source.isPdf) {
+    renderedPages = await renderPages(answerSheetUrl);
+  } else {
+    if (source.imageWidth <= 0 || source.imageHeight <= 0) {
+      throw new Error("Cannot localize regions: invalid image dimensions for answer sheet.");
+    }
+    const { data, mimeType } = await fetchAsBase64(answerSheetUrl);
+    mediaType = mediaTypeFromMime(mimeType);
+    renderedPages = [
+      {
+        pageNumber: 1,
+        pdfWidth: source.imageWidth,
+        pdfHeight: source.imageHeight,
+        imageWidth: source.imageWidth,
+        imageHeight: source.imageHeight,
+        imageBase64: data,
+      },
+    ];
+  }
 
   // Keep the base64 data accessible by page number for the OpenCV call.
   const renderedByPage = new Map<number, RenderedPage>();
@@ -71,44 +90,35 @@ export async function localizeAnswerRegions(
   // Step 2: Gemini coarse localization — one call per page.
   const geminiResult = await benchmarkGeminiRegionsFromRenderedPages(
     visionProvider,
-    renderedPages
+    renderedPages,
+    mediaType
   );
 
-  // Step 3: For each Gemini region with a usable pixelBbox:
-  //   a. Find the matching answer.
-  //   b. Call OpenCV to tighten the bbox within the Gemini window.
-  //   c. Convert the OpenCV pixel bbox → PDF-point coordinates.
-  //   d. Append the AnswerRegion to the answer.
+  // Step 3: tighten each Gemini region with OpenCV, convert to PDF points.
   for (const pageBenchmark of geminiResult.pages) {
     const rendered = renderedByPage.get(pageBenchmark.pageNumber);
     if (!rendered) continue;
 
     for (const region of pageBenchmark.regions) {
-      // Gemini supplied no usable bbox — skip, do not fabricate (req 5, 7).
+      // No usable bbox — skip rather than fabricate one.
       if (!region.pixelBbox) continue;
 
-      // No matching answer for this question number — skip.
       const idx = answerIndexByNumber.get(region.detectedQuestionNumber);
       if (idx === undefined) continue;
 
       const answer = result[idx];
-
-      // Empty-text answer must not receive a region (req 13).
       if (!answer.text) continue;
 
-      // Step b: OpenCV visual tightening.
       let localized: Awaited<ReturnType<typeof localizeHandwriting>>;
       try {
         localized = await localizeHandwriting(rendered.imageBase64, region.pixelBbox);
       } catch {
-        // OpenCV call failed — do not fabricate a region (req 6, 8).
         continue;
       }
 
-      // OpenCV found no foreground — do not fabricate a region (req 8).
+      // OpenCV found no foreground — skip rather than fabricate a region.
       if (!localized.localizedBbox) continue;
 
-      // Step c: pixel → PDF-point conversion using the actual page dimensions.
       const pdfBbox = convertPixelToPdfBbox(
         localized.localizedBbox,
         rendered.pdfWidth,

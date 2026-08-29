@@ -219,6 +219,24 @@ describe("extractAnswers — deterministic", () => {
     const answers = await extractAnswers(pages);
     expect(answers).toEqual([]);
   });
+
+  // Regression: students commonly label answers "Q1", "Q2", "Q3(a)" rather
+  // than bare "1", "2", "3(a)" — the deterministic parser must strip the "Q"
+  // so detectedQuestionNumber still matches the question paper's numbering.
+  it("strips a 'Q' prefix from section headers like 'Q1.' and 'Q3(a):'", async () => {
+    const pages: OcrPage[] = [{
+      pageNumber: 1, width: 595, height: 842,
+      elements: [
+        { text: "Q1.", bbox: { x: 72, y: 100, width: 20, height: 12 } },
+        { text: "Ans: A variable stores data.", bbox: { x: 90, y: 115, width: 200, height: 12 } },
+        { text: "Q3(a):", bbox: { x: 72, y: 145, width: 40, height: 12 } },
+        { text: "Ans: An OS manages hardware.", bbox: { x: 90, y: 160, width: 200, height: 12 } },
+      ],
+    }];
+    const answers = await extractAnswers(pages);
+    const numbers = answers.map((a) => a.detectedQuestionNumber);
+    expect(numbers).toEqual(["1", "3(a)"]);
+  });
 });
 
 // ─── Gemini-first extraction ─────────────────────────────────────────────────
@@ -314,6 +332,25 @@ describe("extractAnswers — Gemini-first extraction", () => {
       imageUrl: "http://example.com/sheet.png",
     });
     expect(answers).toEqual([]);
+  });
+
+  // Regression: a real student answer sheet labeled "Q1", "Q2", "Q4(a)" caused
+  // every answer to fall into "unmatched" because Gemini returned the "Q"
+  // prefix verbatim, and mappingService's lookup is an exact string match
+  // against the question paper's prefix-less numbering ("1", "4(a)").
+  it("strips a 'Q' prefix from AI-returned question numbers so they match the question paper's numbering", async () => {
+    const provider = makeMockVisionProvider([
+      { questionNumber: "Q1", answerText: "The Silk Road connected East and West." },
+      { questionNumber: "Q4(a)", answerText: "Michelangelo, Leonardo da Vinci." },
+      { questionNumber: "Question 5", answerText: "The cotton gin changed farming." },
+      { questionNumber: "Q.2", answerText: "Colonial anger over the Tea Act." },
+    ]);
+    const answers = await extractAnswers(GARBLED_ANSWER_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://example.com/sheet.png",
+    });
+    const numbers = answers.map((a) => a.detectedQuestionNumber);
+    expect(numbers).toEqual(["1", "4(a)", "5", "2"]);
   });
 });
 

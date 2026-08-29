@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { Assessment, AssessmentResult, CloudinaryAsset, ProcessingStatus } from "../models/assessment";
+import { Assessment, AssessmentError, AssessmentResult, CloudinaryAsset, ProcessingStatus } from "../models/assessment";
 
 const store = new Map<string, Assessment>();
 
@@ -54,6 +54,13 @@ export function updateStatus(id: string, status: ProcessingStatus): Assessment {
 export function setResult(id: string, result: AssessmentResult): Assessment {
   const assessment = findOrThrow(id);
   assessment.result = result;
+  assessment.updatedAt = now();
+  return assessment;
+}
+
+export function setError(id: string, error: AssessmentError | undefined): Assessment {
+  const assessment = findOrThrow(id);
+  assessment.error = error;
   assessment.updatedAt = now();
   return assessment;
 }

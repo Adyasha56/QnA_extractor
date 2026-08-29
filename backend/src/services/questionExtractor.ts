@@ -11,37 +11,40 @@ import { VisionProvider } from "../clients/visionProvider";
 
 const SUB_LABEL = String.raw`[a-z]|i{1,3}|iv|v|vi{1,3}|vii|viii|ix|x{1,2}|xi|xii`;
 
+// Optional "Q", "Q.", "Question" prefix before the number — e.g. "Q3(a)", "Q.1".
+const Q_PREFIX = String.raw`(?:[Qq](?:uestion\s*)?\.?\s*)?`;
+
 const QUESTION_PATTERNS: Array<{
   re: RegExp;
   buildNumber: (m: RegExpMatchArray) => string;
 }> = [
-  // "3(a)." | "3(a):" | "3(a) "  — sub-part immediately after number
+  // "3(a)." | "3(a):" | "3(a) " | "Q3(a):"  — sub-part immediately after number
   {
     re: new RegExp(
-      String.raw`^(\d+)\s*\(\s*(${SUB_LABEL})\s*\)\s*[.:\s]`,
+      String.raw`^${Q_PREFIX}(\d+)\s*\(\s*(${SUB_LABEL})\s*\)\s*[.:\s]`,
       "i"
     ),
     buildNumber: (m) => `${m[1]}(${m[2].toLowerCase()})`,
   },
-  // "3. (a)" | "3: (a)"  — separator between number and sub-part
+  // "3. (a)" | "3: (a)" | "Q3. (a)"  — separator between number and sub-part
   {
     re: new RegExp(
-      String.raw`^(\d+)\s*[.:)]\s*\(\s*(${SUB_LABEL})\s*\)`,
+      String.raw`^${Q_PREFIX}(\d+)\s*[.:)]\s*\(\s*(${SUB_LABEL})\s*\)`,
       "i"
     ),
     buildNumber: (m) => `${m[1]}(${m[2].toLowerCase()})`,
   },
-  // "3 (a)"  — space only between number and sub-part
+  // "3 (a)" | "Q3 (a)"  — space only between number and sub-part
   {
     re: new RegExp(
-      String.raw`^(\d+)\s+\(\s*(${SUB_LABEL})\s*\)`,
+      String.raw`^${Q_PREFIX}(\d+)\s+\(\s*(${SUB_LABEL})\s*\)`,
       "i"
     ),
     buildNumber: (m) => `${m[1]}(${m[2].toLowerCase()})`,
   },
   // "1."  | "1)"  | "1:" | "Q1." | "Question 1:"
   {
-    re: /^(?:[Qq](?:uestion\s*)?\.?\s*)?(\d+)\s*[.:)]\s+/,
+    re: new RegExp(String.raw`^${Q_PREFIX}(\d+)\s*[.:)]\s+`),
     buildNumber: (m) => m[1],
   },
 ];
@@ -59,6 +62,8 @@ export type QuestionExtractionOptions = {
   /** base64 image data (alternative to imageUrl). */
   imageBase64?: string;
   imageMediaType?: "image/jpeg" | "image/png" | "image/webp";
+  /** Set for photographed/scanned images, where OCR is unreliable enough that AI should run first. */
+  preferAI?: boolean;
 };
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -67,6 +72,16 @@ export async function extractQuestions(
   pages: OcrPage[],
   options: QuestionExtractionOptions = {}
 ): Promise<Question[]> {
+  const canUseAI = !!options.visionProvider && (!!options.imageUrl || !!options.imageBase64);
+
+  if (options.preferAI && canUseAI) {
+    try {
+      return await extractQuestionsWithAI(options.visionProvider!, options);
+    } catch {
+      // AI failed — fall through to deterministic OCR parsing as a last resort.
+    }
+  }
+
   // 1. Try deterministic extraction from OCR elements.
   const lines = reconstructLines(pages);
   const deterministic = parseQuestionsFromLines(lines);
@@ -75,9 +90,10 @@ export async function extractQuestions(
     return deterministic;
   }
 
-  // 2. Deterministic found nothing — attempt AI if a provider is configured.
-  if (options.visionProvider && (options.imageUrl || options.imageBase64)) {
-    return extractQuestionsWithAI(options.visionProvider, options);
+  // 2. Deterministic found nothing (and we haven't already tried AI above) —
+  // attempt AI if a provider is configured.
+  if (canUseAI && !options.preferAI) {
+    return extractQuestionsWithAI(options.visionProvider!, options);
   }
 
   return [];
@@ -196,6 +212,8 @@ Return ONLY a JSON array — no explanations, no markdown fences:
 Rules:
 - Preserve exact numbering including sub-parts such as "3(a)", "3(b)", "12(i)", "12(ii)".
 - Treat every sub-part as a separate entry.
+- Return ONLY the bare number/label — strip any leading "Q", "Q.", or "Question" prefix.
+  E.g. "Q3(a)" or "Question 3(a)" on the page must be returned as "3(a)", not "Q3(a)".
 - Do NOT include answers or the title.
 - Output ONLY the JSON array.`;
 
@@ -230,7 +248,7 @@ function validateAndBuildQuestions(raw: unknown): Question[] {
     if (typeof item?.number !== "string" || typeof item?.text !== "string") {
       continue; // skip malformed entries rather than failing entirely
     }
-    const number = item.number.trim();
+    const number = stripQuestionPrefix(item.number);
     const text = item.text.trim();
     if (!number) continue;
 
@@ -248,6 +266,12 @@ function validateAndBuildQuestions(raw: unknown): Question[] {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// Strips a leading "Q"/"Q."/"Question" the model didn't already omit, e.g.
+// "Q3(a)" -> "3(a)" — needed so answers match questions by the same number.
+export function stripQuestionPrefix(raw: string): string {
+  return raw.trim().replace(/^[Qq](?:uestion)?\.?\s*/, "").trim();
+}
 
 export function unionBbox(boxes: BoundingBox[]): BoundingBox {
   if (boxes.length === 0) return { x: 0, y: 0, width: 0, height: 0 };

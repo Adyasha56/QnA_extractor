@@ -31,6 +31,7 @@ jest.mock("../src/services/answerExtractor");
 jest.mock("../src/services/answerLocalizationService");
 jest.mock("../src/services/mappingService");
 jest.mock("../src/clients/visionClientFactory");
+jest.mock("../src/services/gradingService");
 
 import { processDocument } from "../src/clients/pythonClient";
 import { extractQuestions } from "../src/services/questionExtractor";
@@ -38,6 +39,7 @@ import { extractAnswers } from "../src/services/answerExtractor";
 import { localizeAnswerRegions } from "../src/services/answerLocalizationService";
 import { mapQuestionsToAnswers } from "../src/services/mappingService";
 import { buildVisionClientFromEnv } from "../src/clients/visionClientFactory";
+import { gradeAnswers } from "../src/services/gradingService";
 
 const mockProcessDocument = processDocument as jest.MockedFunction<typeof processDocument>;
 const mockExtractQuestions = extractQuestions as jest.MockedFunction<typeof extractQuestions>;
@@ -45,6 +47,7 @@ const mockExtractAnswers = extractAnswers as jest.MockedFunction<typeof extractA
 const mockLocalizeAnswerRegions = localizeAnswerRegions as jest.MockedFunction<typeof localizeAnswerRegions>;
 const mockMapQuestionsToAnswers = mapQuestionsToAnswers as jest.MockedFunction<typeof mapQuestionsToAnswers>;
 const mockBuildVisionClientFromEnv = buildVisionClientFromEnv as jest.MockedFunction<typeof buildVisionClientFromEnv>;
+const mockGradeAnswers = gradeAnswers as jest.MockedFunction<typeof gradeAnswers>;
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -131,6 +134,7 @@ beforeEach(() => {
   mockExtractAnswers.mockResolvedValue(EXTRACTED_ANSWERS);
   mockLocalizeAnswerRegions.mockResolvedValue(LOCALIZED_ANSWERS);
   mockMapQuestionsToAnswers.mockResolvedValue(MOCK_MAPPING_RESULT);
+  mockGradeAnswers.mockResolvedValue([]);
 });
 
 // ─── Full pipeline success ────────────────────────────────────────────────────
@@ -143,14 +147,37 @@ describe("Phase 8 pipeline — success", () => {
     expect(res.body.processingStatus).toBe("completed");
   });
 
-  it("calls localizeAnswerRegions with the answer sheet URL and extracted answers", async () => {
+  it("calls localizeAnswerRegions with the answer sheet URL, extracted answers, and a PDF source flag", async () => {
     const id = await createReadyAssessment();
     await request(app).post(`/api/assessments/${id}/process`).expect(200);
 
+    // AS_ASSET.format === "pdf" in this fixture.
     expect(mockLocalizeAnswerRegions).toHaveBeenCalledWith(
       AS_ASSET.secureUrl,
       EXTRACTED_ANSWERS,
-      MOCK_VISION_PROVIDER
+      MOCK_VISION_PROVIDER,
+      { isPdf: true }
+    );
+  });
+
+  // Regression: exact-region highlighting must also work for image (JPEG/PNG)
+  // answer sheets, not just PDFs — localizeAnswerRegions needs to know it's
+  // an image and the image's own pixel dimensions (from the OCR pass, no
+  // second fetch) instead of PDF-point page dimensions.
+  it("calls localizeAnswerRegions with image dimensions when the answer sheet is not a PDF", async () => {
+    const imageAnswerSheet: CloudinaryAsset = { ...AS_ASSET, format: "png" };
+    const res = await request(app).post("/api/assessments").expect(201);
+    const id = res.body.id as string;
+    setQuestionPaper(id, QP_ASSET);
+    setAnswerSheet(id, imageAnswerSheet);
+
+    await request(app).post(`/api/assessments/${id}/process`).expect(200);
+
+    expect(mockLocalizeAnswerRegions).toHaveBeenCalledWith(
+      imageAnswerSheet.secureUrl,
+      EXTRACTED_ANSWERS,
+      MOCK_VISION_PROVIDER,
+      { isPdf: false, imageWidth: MOCK_PAGES[0].width, imageHeight: MOCK_PAGES[0].height }
     );
   });
 
@@ -232,6 +259,46 @@ describe("Phase 8 pipeline — localization failure recovery", () => {
       MOCK_QUESTIONS,
       EXTRACTED_ANSWERS
     );
+  });
+
+  // Regression: a silently-swallowed localization failure looks identical to
+  // "nothing to highlight" from the teacher's point of view — the result
+  // must say why, and say something different for a transient AI issue
+  // (worth retrying) vs. a genuine failure.
+  it("adds a warning to the result when localization fails with an AI-unavailable error", async () => {
+    mockLocalizeAnswerRegions.mockRejectedValue(
+      new Error("[429 Too Many Requests] quota exceeded")
+    );
+    mockMapQuestionsToAnswers.mockResolvedValue(MOCK_MAPPING_RESULT);
+
+    const id = await createReadyAssessment();
+    const res = await request(app).post(`/api/assessments/${id}/process`).expect(200);
+
+    expect(res.body.warnings).toEqual([
+      expect.stringMatching(/temporarily rate-limited or overloaded/i),
+    ]);
+  });
+
+  it("adds a generic warning when localization fails for a non-AI reason", async () => {
+    mockLocalizeAnswerRegions.mockRejectedValue(new Error("render service down"));
+    mockMapQuestionsToAnswers.mockResolvedValue(MOCK_MAPPING_RESULT);
+
+    const id = await createReadyAssessment();
+    const res = await request(app).post(`/api/assessments/${id}/process`).expect(200);
+
+    expect(res.body.warnings).toEqual([
+      "Exact answer-region highlighting could not be computed for this answer sheet.",
+    ]);
+  });
+
+  it("omits warnings entirely when localization succeeds", async () => {
+    mockLocalizeAnswerRegions.mockResolvedValue(LOCALIZED_ANSWERS);
+    mockMapQuestionsToAnswers.mockResolvedValue(MOCK_MAPPING_RESULT);
+
+    const id = await createReadyAssessment();
+    const res = await request(app).post(`/api/assessments/${id}/process`).expect(200);
+
+    expect(res.body.warnings).toBeUndefined();
   });
 });
 

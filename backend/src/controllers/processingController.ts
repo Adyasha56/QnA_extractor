@@ -49,8 +49,11 @@ export async function statusHandler(
       assessmentId: assessment.id,
       status: assessment.status,
       progress: PROGRESS[assessment.status],
-      message: STATUS_MESSAGE[assessment.status],
+      // Prefer the specific error message (e.g. "AI service rate-limited")
+      // over the generic per-status message when one is available.
+      message: assessment.error?.message ?? STATUS_MESSAGE[assessment.status],
       updatedAt: assessment.updatedAt,
+      ...(assessment.error ? { error: assessment.error } : {}),
     });
   } catch (err) {
     next(err);

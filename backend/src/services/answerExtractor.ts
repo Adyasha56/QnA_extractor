@@ -1,34 +1,37 @@
 import { randomUUID } from "crypto";
 import { OcrPage, Answer, AnswerRegion, BoundingBox, OcrElement } from "../models/extraction";
 import { VisionProvider } from "../clients/visionProvider";
-import { unionBbox } from "./questionExtractor";
+import { unionBbox, stripQuestionPrefix } from "./questionExtractor";
 
 // ─── Patterns ────────────────────────────────────────────────────────────────
 
 // Same sub-label set as question extractor.
 const SUB_LABEL = String.raw`[a-z]|i{1,3}|iv|v|vi{1,3}|vii|viii|ix|x{1,2}|xi|xii`;
 
+// Optional "Q", "Q.", "Question" prefix — students commonly label answers "Q1", "Q3(a)".
+const Q_PREFIX = String.raw`(?:[Qq](?:uestion\s*)?\.?\s*)?`;
+
 // Lines that open a new answer section (student writes the question number).
 const SECTION_PATTERNS: Array<{
   re: RegExp;
   buildNumber: (m: RegExpMatchArray) => string;
 }> = [
-  // "3(a)." | "3(a): " | "3(a) " | "3(a)" (standalone on its own line)
+  // "3(a)." | "3(a): " | "3(a) " | "3(a)" | "Q3(a):" (standalone on its own line)
   {
-    re: new RegExp(String.raw`^(\d+)\s*\(\s*(${SUB_LABEL})\s*\)(?:\s*[.:\s]|$)`, "i"),
+    re: new RegExp(String.raw`^${Q_PREFIX}(\d+)\s*\(\s*(${SUB_LABEL})\s*\)(?:\s*[.:\s]|$)`, "i"),
     buildNumber: (m) => `${m[1]}(${m[2].toLowerCase()})`,
   },
   {
-    re: new RegExp(String.raw`^(\d+)\s*[.:)]\s*\(\s*(${SUB_LABEL})\s*\)`, "i"),
+    re: new RegExp(String.raw`^${Q_PREFIX}(\d+)\s*[.:)]\s*\(\s*(${SUB_LABEL})\s*\)`, "i"),
     buildNumber: (m) => `${m[1]}(${m[2].toLowerCase()})`,
   },
   {
-    re: new RegExp(String.raw`^(\d+)\s+\(\s*(${SUB_LABEL})\s*\)`, "i"),
+    re: new RegExp(String.raw`^${Q_PREFIX}(\d+)\s+\(\s*(${SUB_LABEL})\s*\)`, "i"),
     buildNumber: (m) => `${m[1]}(${m[2].toLowerCase()})`,
   },
   // "1." | "1: " | "Q1." | "Question 1:" | standalone "1."
   {
-    re: /^(?:[Qq](?:uestion\s*)?\.?\s*)?(\d+)\s*[.:)]\s*/,
+    re: new RegExp(String.raw`^${Q_PREFIX}(\d+)\s*[.:)]\s*`),
     buildNumber: (m) => m[1],
   },
 ];
@@ -189,6 +192,9 @@ Rules:
 - Include ALL questions visible on the sheet, even if answers are out of order.
 - Set answerText to null when the answer is blank or missing.
 - Preserve exact handwritten question numbers including sub-parts like "3(a)", "3(b)".
+- Return ONLY the bare number/label — strip any leading "Q", "Q.", or "Question" prefix.
+  E.g. a sheet labeled "Q1", "Q.1", or "Question 1" must be returned as "1", not "Q1".
+  Likewise "Q3(a)" must be returned as "3(a)".
 - Do NOT invent question numbers.
 - Output ONLY the JSON array.`;
 
@@ -234,7 +240,7 @@ function validateAndBuildAnswers(raw: unknown): Answer[] {
     const entry = item as RawAIAnswer;
 
     if (typeof entry?.questionNumber !== "string") continue;
-    const number = entry.questionNumber.trim();
+    const number = stripQuestionPrefix(entry.questionNumber);
     if (!number) continue;
 
     const rawText =

@@ -6,7 +6,7 @@ const REQUEST_TIMEOUT_MS = 60_000;
 
 // ─── Helper: fetch a URL and return base64 + MIME type ────────────────────────
 
-async function fetchAsBase64(url: string): Promise<{ data: string; mimeType: string }> {
+export async function fetchAsBase64(url: string): Promise<{ data: string; mimeType: string }> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(
@@ -21,7 +21,7 @@ async function fetchAsBase64(url: string): Promise<{ data: string; mimeType: str
 
 // ─── Helper: strip markdown fences and parse JSON ─────────────────────────────
 
-function parseJsonFromText(text: string): unknown {
+export function parseJsonFromText(text: string): unknown {
   const stripped = text
     .replace(/^```(?:json)?\s*/m, "")
     .replace(/\s*```\s*$/m, "")
@@ -101,4 +101,16 @@ export function buildGeminiClientFromEnv(): GeminiVisionClient | null {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return null;
   return new GeminiVisionClient(key);
+}
+
+// ─── Error classification ──────────────────────────────────────────────────────
+
+// Detects a rate-limit/quota/overload error from Gemini, as opposed to a
+// genuine bug — lets callers surface "try again shortly" instead of a
+// generic failure.
+export function isAiUnavailableError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /\b429\b|too many requests|quota|rate limit|\b503\b|service unavailable|overloaded|high demand/i.test(
+    message
+  );
 }

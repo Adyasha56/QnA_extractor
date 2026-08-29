@@ -215,6 +215,22 @@ describe("extractQuestions — deterministic (typed PDF)", () => {
     const qs = await extractQuestions(pages);
     expect(qs).toEqual([]);
   });
+
+  // Regression: a question paper numbered "Q1.", "Q3(a)." must still produce
+  // bare numbers ("1", "3(a)") so answers labeled the same way actually match.
+  it("strips a 'Q' prefix from question numbers like 'Q1.' and 'Q3(a).'", async () => {
+    const pages: OcrPage[] = [{
+      pageNumber: 1, width: 595, height: 842,
+      elements: [
+        { text: "Q1.", bbox: { x: 72, y: 100, width: 20, height: 12 } },
+        { text: "What is a variable?", bbox: { x: 95, y: 100, width: 150, height: 12 } },
+        { text: "Q3(a).", bbox: { x: 72, y: 130, width: 40, height: 12 } },
+        { text: "What is an operating system?", bbox: { x: 115, y: 130, width: 180, height: 12 } },
+      ],
+    }];
+    const qs = await extractQuestions(pages);
+    expect(qs.map((q) => q.number)).toEqual(["1", "3(a)"]);
+  });
 });
 
 // ─── AI-assisted extraction ──────────────────────────────────────────────────
@@ -298,6 +314,67 @@ describe("extractQuestions — AI fallback", () => {
         imageUrl: "http://example.com/doc.png",
       })
     ).rejects.toThrow("Network timeout");
+  });
+
+  // Regression: Gemini sometimes echoes a "Q" prefix verbatim even when asked
+  // not to — must be stripped in code, not just relied on via the prompt.
+  it("strips a 'Q' prefix from AI-returned numbers", async () => {
+    const provider = makeMockVisionProvider([
+      { number: "Q1", text: "What is a variable?" },
+      { number: "Q3(a)", text: "What is an operating system?" },
+      { number: "Question 5", text: "Explain polymorphism." },
+    ]);
+    const qs = await extractQuestions(GARBLED_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://example.com/doc.png",
+    });
+    expect(qs.map((q) => q.number)).toEqual(["1", "3(a)", "5"]);
+  });
+});
+
+// ─── preferAI (image-sourced question papers) ─────────────────────────────────
+
+describe("extractQuestions — preferAI", () => {
+  it("uses AI even when deterministic finds a (spurious) match, when preferAI is set", async () => {
+    // Simulates a photographed question paper where poor Tesseract OCR
+    // produces one bogus pattern match that swallows all the real text —
+    // deterministic parsing "succeeds" (returns something), but it's garbage.
+    const provider = makeMockVisionProvider(MOCK_AI_QUESTIONS);
+    const qs = await extractQuestions(BENCHMARK_QP_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://example.com/doc.png",
+      preferAI: true,
+    });
+    expect(provider.analyze).toHaveBeenCalledTimes(1);
+    expect(qs).toHaveLength(7);
+  });
+
+  it("does not use preferAI when no vision provider is configured (deterministic still used)", async () => {
+    const qs = await extractQuestions(BENCHMARK_QP_PAGES, { preferAI: true });
+    expect(qs.length).toBeGreaterThan(0);
+  });
+
+  it("falls back to deterministic parsing when the AI call fails, even with preferAI set", async () => {
+    const provider: VisionProvider = {
+      analyze: jest.fn().mockRejectedValue(new Error("Network timeout")),
+    };
+    const qs = await extractQuestions(BENCHMARK_QP_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://example.com/doc.png",
+      preferAI: true,
+    });
+    // Deterministic parsing on the (clean, in this fixture) OCR text still works.
+    expect(qs.length).toBeGreaterThan(0);
+  });
+
+  it("without preferAI, a clean deterministic result is still used as-is (no AI call, existing behavior unchanged)", async () => {
+    const provider = makeMockVisionProvider(MOCK_AI_QUESTIONS);
+    const qs = await extractQuestions(BENCHMARK_QP_PAGES, {
+      visionProvider: provider,
+      imageUrl: "http://example.com/doc.png",
+    });
+    expect(provider.analyze).not.toHaveBeenCalled();
+    expect(qs).toHaveLength(7);
   });
 });
 

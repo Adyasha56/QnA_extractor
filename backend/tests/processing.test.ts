@@ -19,16 +19,19 @@ jest.mock("../src/clients/pythonClient");
 jest.mock("../src/services/questionExtractor");
 jest.mock("../src/services/answerExtractor");
 jest.mock("../src/services/mappingService");
+jest.mock("../src/services/gradingService");
 
 import { processDocument } from "../src/clients/pythonClient";
 import { extractQuestions } from "../src/services/questionExtractor";
 import { extractAnswers } from "../src/services/answerExtractor";
 import { mapQuestionsToAnswers } from "../src/services/mappingService";
+import { gradeAnswers } from "../src/services/gradingService";
 
 const mockProcessDocument = processDocument as jest.MockedFunction<typeof processDocument>;
 const mockExtractQuestions = extractQuestions as jest.MockedFunction<typeof extractQuestions>;
 const mockExtractAnswers = extractAnswers as jest.MockedFunction<typeof extractAnswers>;
 const mockMapQuestionsToAnswers = mapQuestionsToAnswers as jest.MockedFunction<typeof mapQuestionsToAnswers>;
+const mockGradeAnswers = gradeAnswers as jest.MockedFunction<typeof gradeAnswers>;
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -94,6 +97,7 @@ beforeEach(() => {
   mockExtractQuestions.mockResolvedValue(MOCK_QUESTIONS);
   mockExtractAnswers.mockResolvedValue(MOCK_ANSWERS);
   mockMapQuestionsToAnswers.mockResolvedValue(MOCK_MAPPING_RESULT);
+  mockGradeAnswers.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -257,6 +261,65 @@ describe("POST /api/assessments/:id/process — downstream failures", () => {
     const id = await createReadyAssessment();
     const res = await request(app).post(`/api/assessments/${id}/process`);
     expect(res.status).toBe(500);
+  });
+});
+
+// ─── AI-unavailable error surfacing ────────────────────────────────────────────
+
+describe("POST /api/assessments/:id/process — AI-unavailable error surfacing", () => {
+  it("sets error.code to 'ai_unavailable' when extraction fails with a rate-limit-shaped error", async () => {
+    mockExtractQuestions.mockRejectedValueOnce(
+      new Error("[GoogleGenerativeAI Error]: ... [429 Too Many Requests] You exceeded your current quota")
+    );
+
+    const id = await createReadyAssessment();
+    await request(app).post(`/api/assessments/${id}/process`);
+
+    const res = await request(app).get(`/api/assessments/${id}/status`);
+    expect(res.body.error?.code).toBe("ai_unavailable");
+    expect(res.body.message).toMatch(/temporarily rate-limited or overloaded/i);
+  });
+
+  it("sets error.code to 'ai_unavailable' for a 503 'high demand' error too", async () => {
+    mockExtractAnswers.mockRejectedValueOnce(
+      new Error("[503 Service Unavailable] This model is currently experiencing high demand.")
+    );
+
+    const id = await createReadyAssessment();
+    await request(app).post(`/api/assessments/${id}/process`);
+
+    const res = await request(app).get(`/api/assessments/${id}/status`);
+    expect(res.body.error?.code).toBe("ai_unavailable");
+  });
+
+  it("sets error.code to 'unknown' for a non-AI failure, with the original message preserved", async () => {
+    mockMapQuestionsToAnswers.mockRejectedValueOnce(new Error("mapping exploded unexpectedly"));
+
+    const id = await createReadyAssessment();
+    await request(app).post(`/api/assessments/${id}/process`);
+
+    const res = await request(app).get(`/api/assessments/${id}/status`);
+    expect(res.body.error?.code).toBe("unknown");
+    expect(res.body.message).toBe("mapping exploded unexpectedly");
+  });
+
+  it("does not include an error field on GET /status for a healthy assessment", async () => {
+    const id = await createReadyAssessment();
+    const res = await request(app).get(`/api/assessments/${id}/status`);
+    expect(res.body.error).toBeUndefined();
+  });
+
+  it("clears a previous run's error once a later run succeeds", async () => {
+    mockExtractQuestions.mockRejectedValueOnce(new Error("[429 Too Many Requests] quota exceeded"));
+    const id = await createReadyAssessment();
+    await request(app).post(`/api/assessments/${id}/process`);
+    expect((await request(app).get(`/api/assessments/${id}/status`)).body.error?.code).toBe("ai_unavailable");
+
+    // Retry succeeds (mocks default back to happy-path resolved values).
+    await request(app).post(`/api/assessments/${id}/process`).expect(200);
+    const res = await request(app).get(`/api/assessments/${id}/status`);
+    expect(res.body.error).toBeUndefined();
+    expect(res.body.status).toBe("completed");
   });
 });
 
