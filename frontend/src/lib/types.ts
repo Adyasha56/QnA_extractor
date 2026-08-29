@@ -1,5 +1,4 @@
 // ─── Extraction ──────────────────────────────────────────────────────────────
-// Mirrors backend/src/models/extraction.ts exactly.
 
 export type BoundingBox = {
   x: number;
@@ -20,24 +19,21 @@ export type OcrPage = {
   elements: OcrElement[];
 };
 
-/** Structured question extracted from a question paper. */
 export type Question = {
-  id: string;        // e.g. "q_3_a"
-  number: string;    // original label: "1", "3(a)", "12(ii)"
+  id: string;
+  number: string;
   text: string;
-  order: number;     // 1-based sequential position
+  order: number;
   sourcePage: number;
-  bbox?: BoundingBox; // absent when extracted via AI
+  bbox?: BoundingBox;
 };
 
-/** A spatial region belonging to an answer (may span multiple pages). */
 export type AnswerRegion = {
   page: number;
   bbox: BoundingBox;
   text?: string;
 };
 
-/** Structured answer block extracted from a student answer sheet. */
 export type Answer = {
   id: string;
   text: string;
@@ -46,7 +42,6 @@ export type Answer = {
 };
 
 // ─── Mapping ─────────────────────────────────────────────────────────────────
-// Mirrors backend/src/models/mapping.ts exactly.
 
 export type QuestionAnswerMapping = {
   questionId: string;
@@ -66,7 +61,6 @@ export type UnmatchedAnswer = {
 };
 
 // ─── Assessment ───────────────────────────────────────────────────────────────
-// Mirrors backend/src/models/assessment.ts exactly.
 
 export type CloudinaryAsset = {
   publicId: string;
@@ -85,6 +79,11 @@ export type ProcessingStatus =
   | "completed"
   | "failed";
 
+export type AssessmentError = {
+  message: string;
+  code: "ai_unavailable" | "unknown";
+};
+
 export type Assessment = {
   id: string;
   status: ProcessingStatus;
@@ -93,6 +92,7 @@ export type Assessment = {
   questionPaper?: CloudinaryAsset;
   answerSheet?: CloudinaryAsset;
   result?: AssessmentResult;
+  error?: AssessmentError;
 };
 
 export type AssessmentResult = {
@@ -103,15 +103,43 @@ export type AssessmentResult = {
   unansweredQuestions: UnansweredQuestion[];
   unmatchedAnswers: UnmatchedAnswer[];
   processingStatus: ProcessingStatus;
+  /** Best-effort AI grading. Absent/empty when ungraded — not an error state. */
+  grading?: QuestionGrading[];
+  /** Notes about features that degraded during processing but didn't fail it. */
+  warnings?: string[];
+};
+
+// ─── Grading ─────────────────────────────────────────────────────────────────
+
+export type QuestionGrading = {
+  questionId: string;
+  score: number;
+  maxScore: number;
+  correct: boolean;
+  feedback: string;
+};
+
+// ─── Rendered pages ────────────────────────────────────────────────────────────
+// Only used for PDF documents — images are shown via their Cloudinary
+// secureUrl directly, no rendering involved.
+
+export type PageImage = {
+  pageNumber: number;
+  /** Same unit as AnswerRegion.bbox. */
+  pdfWidth: number;
+  pdfHeight: number;
+  imageWidth: number;
+  imageHeight: number;
+  imageBase64: string;
 };
 
 // ─── API response shapes ──────────────────────────────────────────────────────
-// Mirrors GET /api/assessments/:id/status response from processingController.ts
 
 export type StatusResponse = {
   assessmentId: string;
   status: ProcessingStatus;
-  progress: number;   // 0–100
-  message: string;    // human-readable description
-  updatedAt: string;  // ISO date string
+  progress: number;
+  message: string;
+  updatedAt: string;
+  error?: AssessmentError;
 };
