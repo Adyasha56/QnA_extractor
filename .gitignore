@@ -20,6 +20,14 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Playwright test artifacts
+.playwright-mcp/
+
 # Scratch test scripts
 test_localize_chain.py
 document-service/tests/test_handwriting_localizer.py
